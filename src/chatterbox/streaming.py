@@ -103,7 +103,7 @@ class ChatterboxStreamer:
         self.request_queue = queue.Queue()
         self.audio_queue = queue.Queue(maxsize=10)
 
-        self.audio_buffer = AudioBuffer(
+        self.buffer = AudioBuffer(
             fade_duration=fade_duration,
             sample_rate=sample_rate,
             dtype=dtype
@@ -201,41 +201,51 @@ def main():
     test_request = "Hi, I'm Delta's AI assistant! How can I help you today?"
 
     sample_rate = 24000
-    frame_size = 210
+    frame_size = 1024
     frame_duration = frame_size / sample_rate
     dtype = np.float32
 
+    # create server for sending audio
+    print("setting up server...")
     HOST = "0.0.0.0"
     PORT = 9000
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind((HOST, PORT))
     server.listen(1)
 
-    while True:
-        print("waiting for connection...")
-        client, addr = server.accept()
-        print("client connected to server!\n")
+    # waiting for client connection
+    print("waiting on client connection...")
+    client, addr = server.accept() 
+    print("client connected!")
         
-        # initializing and starting chatterbox stream
-        stream = ChatterboxStreamer(
-            sample_rate = sample_rate,
-            fade_duration = 0.02,
-            dtype=dtype
-        )
-        stream.start()
-        
-        # making test request
-        start_time = time.time()
-        stream.make_request((test_request, start_time))
-        
-
-        client.sendall("Hello".encode())
-        client.close()
-
-    streamer = ChatterboxStreamer(
+    # initializing and starting chatterbox stream
+    stream = ChatterboxStreamer(
         sample_rate = sample_rate,
         fade_duration = 0.02,
         dtype=dtype
     )
+    stream.start()
+    
+    # making test request
+    start_time = time.time()
+    stream.make_request((test_request, start_time))
+    terminate = False
+    while True:
+        frame, request_finished = stream.get_frame(frame_size)
+        time.sleep(frame_duration)
+
+        if request_finished: 
+            print(f"Total generation time: {time.time() - start_time}")
+            terminate = True
+    
+        if stream.available_samples() == 0 and terminate:
+            break
+
+    stream.stop()
+
+    client.sendall("Hello".encode())
+    client.close()
+
 
     # # text = [
     # #     "Active-duty U.S. military personnel get special baggage allowances with Delta. When traveling on orders or for personal travel, you’ll receive baggage fee exceptions and extra checked bag benefits. These allowances apply to all branches, including the Marine Corps, Army, Air Force, Space Force, Navy, and Coast Guard. There may be some regional weight or embargo restrictions. Would you like me to text you a link with the full details for military baggage policies?", 
