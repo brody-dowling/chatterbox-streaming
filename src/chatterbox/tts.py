@@ -166,7 +166,6 @@ class ChatterboxTTS:
         self.fade_samples = None
         self.fade_in = None
         self.fade_out = None
-        self.hann_window = None
 
     @classmethod
     def from_local(cls, ckpt_dir, device) -> 'ChatterboxTTS':
@@ -373,15 +372,18 @@ class ChatterboxTTS:
 
         if fade_len != self.fade_samples:
             # Buffer or chunk is smaller than fade_samples
-            Print("WARNING: chunk smaller than fade length")
-            new_window = np.hanning(2 * fade_len)
-            fade_out = new_window[:fade_len]
-            fade_in = new_window[fade_len:]
-            # fade_out = np.linspace(1.0, 0, fade_len, endpoint=True, dtype=self.dtype)
-            # fade_in = 1.0 - fade_out
+            # Use Hann window for smooth, amplitude-preserving crossfade
+            # Hann window: create window such that overlap region sums to 1.0
+            hann_window = np.hanning(2 * fade_len + 2)[1:-1]  # exclude endpoints to avoid zeros
+            fade_out = hann_window[:fade_len]
+            fade_in = hann_window[fade_len:]
+            # Normalize so they sum to 1.0 (preserve amplitude at seam)
+            fade_out = fade_out / (fade_out + fade_in + 1e-8)
+            fade_in = fade_in / (fade_out + fade_in + 1e-8)
             fade_chunk = prev_tail * fade_out + head * fade_in
         else:
             # fade_samples is smaller than buffer and chunk size
+            # Use pre-computed Hann windows (already normalized to sum to 1.0 in setup_stream)
             fade_chunk = prev_tail * self.fade_out + head * self.fade_in
 
         faded_chunk = np.concatenate([fade_chunk, audio_chunk[fade_len:-fade_len]])
@@ -481,12 +483,15 @@ class ChatterboxTTS:
 
         # Setup cross-fading configs
         self.fade_samples = int(round(fade_duration * self.sr))
-        self.hann_window = np.hanning(2 * self.fade_samples)
-        self.fade_out = self.hann_window[:self.fade_samples]
-        self.fade_in = self.hann_window[self.fade_samples:]
-
-        # self.fade_out = np.linspace(1.0, 0, self.fade_samples, endpoint=True, dtype=np.float32)
-        # self.fade_in = 1.0 - self.fade_out
+        # Create Hann window such that overlapping portions sum to 1.0 (amplitude-preserving)
+        # Exclude endpoints to avoid zeros at the edges
+        hann_window = np.hanning(2 * self.fade_samples + 2)[1:-1]
+        fade_out_raw = hann_window[:self.fade_samples]
+        fade_in_raw = hann_window[self.fade_samples:]
+        # Normalize: at each sample, fade_out + fade_in = 1.0
+        energy = fade_out_raw + fade_in_raw
+        self.fade_out = fade_out_raw / (energy + 1e-8)
+        self.fade_in = fade_in_raw / (energy + 1e-8)
 
 
 
