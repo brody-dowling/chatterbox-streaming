@@ -23,7 +23,7 @@ import socket
 
 SAMPLE_RATE = 24000
 
-FADE_DURATION = 0.01
+FADE_DURATION = 0.005
 CONTEXT_WINDOW = 250
 
 EXAGGERATION = 0.5
@@ -85,6 +85,8 @@ def process_chunks(
 ):
     prev_tail = None # Keeps track of the previous chunk tail for cross fading
     all_tokens_processed = [] # Stores previous tokens to fill context window
+    audio = np.zeros(0, dtype=np.float32)
+
 
     while True:
         # Wait on generated tokens
@@ -116,6 +118,9 @@ def process_chunks(
                 metrics.first_chunk_time = time.time()
             metrics.audio_duration += len(audio_chunk) / SAMPLE_RATE
 
+            audio = np.concatenate([audio, audio_chunk])
+            print(len(audio_chunk))
+
             # Send audio over TCP
             data = audio_chunk.tobytes()
             conn.sendall(data)
@@ -130,6 +135,7 @@ def process_chunks(
             all_tokens_processed = torch.cat([all_tokens_processed, token_chunk], dim=-1)
 
     metrics.generation_end_time = time.time()
+    sf.write("new_output.wav", audio, samplerate=SAMPLE_RATE, subtype='FLOAT')
 
 def main():
     # Initialize metrics

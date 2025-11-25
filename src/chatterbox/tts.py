@@ -166,7 +166,7 @@ class ChatterboxTTS:
         self.fade_samples = None
         self.fade_in = None
         self.fade_out = None
-        self.sentence_splitter = None
+        self.hann_window = None
 
     @classmethod
     def from_local(cls, ckpt_dir, device) -> 'ChatterboxTTS':
@@ -348,11 +348,6 @@ class ChatterboxTTS:
         )
         wav = wav.squeeze(0).detach().cpu().numpy()
 
-        for i in range(len(wav)):
-            if wav[i] == 0:
-                print(f"{len(wav)}-{i}")
-
-
         # If we have context tokens, crop out the samples corresponding to them
         # TODO -> this seems impercise considering different tokens may have different audio lengths. Something to consider.
         if context_length > 0:
@@ -378,8 +373,12 @@ class ChatterboxTTS:
 
         if fade_len != self.fade_samples:
             # Buffer or chunk is smaller than fade_samples
-            fade_out = np.linspace(1.0, 0, fade_len, endpoint=True, dtype=self.dtype)
-            fade_in = 1.0 - fade_out
+            Print("WARNING: chunk smaller than fade length")
+            new_window = np.hanning(2 * fade_len)
+            fade_out = new_window[:fade_len]
+            fade_in = new_window[fade_len:]
+            # fade_out = np.linspace(1.0, 0, fade_len, endpoint=True, dtype=self.dtype)
+            # fade_in = 1.0 - fade_out
             fade_chunk = prev_tail * fade_out + head * fade_in
         else:
             # fade_samples is smaller than buffer and chunk size
@@ -419,7 +418,7 @@ class ChatterboxTTS:
         # chunk text by sentence to avoid token limit
         sentences = re.split(r'(?<=[.!?])\s+', text)
         sentences = [s.strip() for s in sentences]
-    
+
         for s in sentences:
             # Norm and tokenize text
             sentence = punc_norm(s)
@@ -482,15 +481,15 @@ class ChatterboxTTS:
 
         # Setup cross-fading configs
         self.fade_samples = int(round(fade_duration * self.sr))
-        self.fade_out = np.linspace(1.0, 0, self.fade_samples, endpoint=True, dtype=np.float32)
-        self.fade_in = 1.0 - self.fade_out
+        self.hann_window = np.hanning(2 * self.fade_samples)
+        self.fade_out = self.hann_window[:self.fade_samples]
+        self.fade_in = self.hann_window[self.fade_samples:]
 
-        # create sentence splitter for pause based chunking
-        self.sentence_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=25,
-            chunk_overlap=0,
-            separators=[".", " ", ","]
-        )
+        # self.fade_out = np.linspace(1.0, 0, self.fade_samples, endpoint=True, dtype=np.float32)
+        # self.fade_in = 1.0 - self.fade_out
+
+
+
 
 
 
