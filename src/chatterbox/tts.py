@@ -314,6 +314,35 @@ class ChatterboxTTS:
             watermarked_wav = self.watermarker.apply_watermark(wav, sample_rate=self.sr)
         return torch.from_numpy(watermarked_wav).unsqueeze(0)
 
+    def setup_model(
+        self,
+        audio_prompt_path: Optional[str] = None,
+        exaggeration: float = 0.5,
+        fade_duration: float = 0.001,
+    ):
+        # Prepare audio prompt if provided
+        if audio_prompt_path:
+            self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
+        else:
+            assert self.conds is not None, "Please `prepare_conditionals` first or specify `audio_prompt_path`"
+
+        # Update exaggeration if needed
+        if exaggeration != self.conds.t3.emotion_adv[0, 0, 0]:
+            _cond: T3Cond = self.conds.t3
+            self.conds.t3 = T3Cond(
+                speaker_emb=_cond.speaker_emb,
+                cond_prompt_speech_tokens=_cond.cond_prompt_speech_tokens,
+                emotion_adv=exaggeration * torch.ones(1, 1, 1),
+            ).to(device=self.device)
+
+        # Setup t3 model
+        self.t3.setup_model()
+
+        # Setup cross-fading configs
+        self.fade_samples = int(round(fade_duration * self.sr))
+        self.fade_out = np.linspace(1.0, 0, self.fade_samples, endpoint=True, dtype=np.float32)
+        self.fade_in = 1.0 - self.fade_out
+
     def _process_token_buffer(
         self,
         token_buffer,
@@ -389,7 +418,7 @@ class ChatterboxTTS:
 
         return faded_chunk, new_tail, True
 
-    def generate_stream(
+    def generate_chunks(
         self,
         text: str,
         repetition_penalty=1.2,
@@ -400,7 +429,8 @@ class ChatterboxTTS:
         chunk_size: int = 25,  # Tokens per chunk
     ) -> Generator[Tuple[torch.Tensor], None, None]:
         """
-        Streaming version of generate that yields audio chunks as they are generated.
+        Streaming version of generate that yields unprocessed audio chunks as they are generated.
+        This funciton is intended to be used in the multipiprocessing implementation.
         
         Args:
             text: Input text to synthesize
@@ -455,42 +485,90 @@ class ChatterboxTTS:
 
         yield END_OF_REQUEST # Signals end of request
 
-
-    def setup_stream(
+    def generate_stream(
         self,
-        audio_prompt_path: Optional[str] = None,
-        exaggeration: float = 0.5,
-        fade_duration: float = 0.001
-    ):
-        # Prepare audio prompt if provided
-        if audio_prompt_path:
-            self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
-        else:
-            assert self.conds is not None, "Please `prepare_conditionals` first or specify `audio_prompt_path`"
+        text: str,
+        repetition_penalty=1.2,
+        min_p=0.05,
+        top_p=1.0,
+        cfg_weight: float = 0.5,
+        temperature: float = 0.8,
+        chunk_size: int = 25,  # Tokens per chunk
+        context_window: int = 300,
+    ) -> Generator[Tuple[torch.Tensor], None, None]:
+        """
+        Streaming version of generate that yields audio chunks as they are generated.
+        
+        Args:
+            text: Input text to synthesize
+            audio_prompt_path: Optional path to reference audio for voice cloning
+            exaggeration: Emotion exaggeration factor
+            cfg_weight: Classifier-free guidance weight
+            temperature: Sampling temperature
+            chunk_size: Number of speech tokens per chunk
+            context_window: The context passed for each chunk
+            fade_duration: Seconds to apply linear fade-in on each chunk
+            
+        Yields:
+            Tuple of (audio_chunk, metrics) where audio_chunk is a torch.Tensor
+            and metrics contains timing information
+        """
+        
+        # chunk text by sentence to avoid token limit
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        sentences = [s.strip() for s in sentences]
 
-        # Update exaggeration if needed
-        if exaggeration != self.conds.t3.emotion_adv[0, 0, 0]:
-            _cond: T3Cond = self.conds.t3
-            self.conds.t3 = T3Cond(
-                speaker_emb=_cond.speaker_emb,
-                cond_prompt_speech_tokens=_cond.cond_prompt_speech_tokens,
-                emotion_adv=exaggeration * torch.ones(1, 1, 1),
-            ).to(device=self.device)
+        total_audio_length = 0.0
+    
+        for s in sentences:
+            # Norm and tokenize text
+            sentence = punc_norm(s)
+            text_tokens = self.tokenizer.text_to_tokens(sentence).to(self.device)
 
-        # Setup t3 model
-        self.t3.setup_model()
+            
+            # While cfg_weight is not essential to TTS generation it improves quality of the output and adherence to conditions. For the purposes of this repository we will require it to be set to a non-zero value.
+            if not cfg_weight > 0.0:
+                raise ValueError("cfg_weight must be greater than zero")
+            text_tokens = torch.cat([text_tokens, text_tokens], dim=0) # Need two seqs for CFG.
 
-        # Setup cross-fading configs
-        self.fade_samples = int(round(fade_duration * self.sr))
-        self.fade_out = np.linspace(1.0, 0, self.fade_samples, endpoint=True, dtype=np.float32)
-        self.fade_in = 1.0 - self.fade_out
+            sot = self.t3.hp.start_text_token
+            eot = self.t3.hp.stop_text_token
+            text_tokens = F.pad(text_tokens, (1, 0), value=sot)
+            text_tokens = F.pad(text_tokens, (0, 1), value=eot)
 
-        # create sentence splitter for pause based chunking
-        self.sentence_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=25,
-            chunk_overlap=0,
-            separators=[".", " ", ","]
-        )
+            all_tokens_processed = []  # Keep track of all tokens processed so far
+            prev_tail = None
+
+            with torch.inference_mode():
+                # Stream speech tokens
+                for token_chunk in self.t3.inference_stream(
+                    t3_cond=self.conds.t3,
+                    text_tokens=text_tokens,
+                    max_new_tokens=1000,
+                    temperature=temperature,
+                    cfg_weight=cfg_weight,
+                    chunk_size=chunk_size,
+                    repetition_penalty=repetition_penalty,
+                    min_p=min_p,
+                    top_p=top_p,
+                ):
+                    # Extract only the conditional batch
+                    token_chunk = token_chunk[0]
+
+                    # Process each chunk immediately
+                    audio_tensor, new_tail, success = self._process_token_buffer(
+                        token_chunk, all_tokens_processed, context_window, prev_tail
+                    )
+
+                    if success:
+                        prev_tail = new_tail
+                        yield audio_tensor
+
+                    # Update all_tokens_processed with the new tokens
+                    if len(all_tokens_processed) == 0:
+                        all_tokens_processed = token_chunk
+                    else:
+                        all_tokens_processed = torch.cat([all_tokens_processed, token_chunk], dim=-1)
 
 
 

@@ -48,7 +48,7 @@ class Metrics:
 
 def load_model():
     model = ChatterboxTTS.from_pretrained(device = "cuda")
-    model.setup_stream(audio_prompt_path=AUDIO_PROMPT_PATH, exaggeration=EXAGGERATION, fade_duration=FADE_DURATION)
+    model.setup_model(audio_prompt_path=AUDIO_PROMPT_PATH, exaggeration=EXAGGERATION, fade_duration=FADE_DURATION)
     return model
 
 def generate_chunks(
@@ -67,7 +67,7 @@ def generate_chunks(
             break
 
         # Perform tts generation
-        for chunk in model.generate_stream(
+        for chunk in model.generate_chunks(
             text=text,
             cfg_weight=CFG_WEIGHT,
             temperature=TEMPERATURE,
