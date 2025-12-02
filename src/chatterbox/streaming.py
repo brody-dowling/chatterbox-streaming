@@ -130,7 +130,14 @@ class ChatterboxStreamer:
         self.request_queue = queue.Queue()
         self.audio_queue = queue.Queue(maxsize=10)
 
-        # Creates tts generator thread
+        self.buffer = AudioBuffer(
+            fade_duration=fade_duration,
+            sample_rate=sample_rate,
+            dtype=dtype
+        )
+        self.target_buffer_samples = int(1.0 * sample_rate)
+
+        # Creates tts generation thread and starts
         self._running = False
         self._tts_thread = threading.Thread(
             target=self._tts_loop, daemon=True
@@ -208,15 +215,15 @@ def main():
 
     # stream configs
     sample_rate = 24000
-    frame_size = 210
+    frame_size = 1024
     frame_duration = frame_size / sample_rate
     dtype = np.float32
 
-    # Setup Server
+    # create server for sending audio
+    print("setting up server...")
     HOST = "0.0.0.0"
     PORT = 9000
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     server.bind((HOST, PORT))
     server.listen(1)
     print("waiting for connection...")
@@ -227,19 +234,44 @@ def main():
         # Setup metrics
         metrics = StreamingMetrics()
 
-        # initializing and starting chatterbox stream
-        stream = ChatterboxStreamer(
-            sample_rate=sample_rate,
-            context_window=50,
-            dtype=dtype,
-            metrics=metrics
-        )
-        stream.start()
+    # waiting for client connection
+    print("waiting on client connection...")
+    client, addr = server.accept() 
+    print("client connected!")
+        
+    # initializing and starting chatterbox stream
+    stream = ChatterboxStreamer(
+        sample_rate = sample_rate,
+        fade_duration = 0.02,
+        dtype=dtype
+    )
+    stream.start()
+    
+    # making test request
+    start_time = time.time()
+    stream.make_request((test_request, start_time))
+    terminate = False
+    while True:
+        frame, request_finished = stream.get_frame(frame_size)
+        time.sleep(frame_duration)
 
-        # Setup main thread metrics
-        metrics.networking_cost = 0.0
-        metrics.total_audio_duration = 0.0
-        ref_time = time.time()
+        if request_finished: 
+            print(f"Total generation time: {time.time() - start_time}")
+            terminate = True
+    
+        if stream.available_samples() == 0 and terminate:
+            break
+
+    stream.stop()
+
+    client.sendall("Hello".encode())
+    client.close()
+
+
+    # # text = [
+    # #     "Active-duty U.S. military personnel get special baggage allowances with Delta. When traveling on orders or for personal travel, you’ll receive baggage fee exceptions and extra checked bag benefits. These allowances apply to all branches, including the Marine Corps, Army, Air Force, Space Force, Navy, and Coast Guard. There may be some regional weight or embargo restrictions. Would you like me to text you a link with the full details for military baggage policies?", 
+    # #     "Yes, there are specific restrictions for minors and unaccompanied minors traveling internationally with Delta Air Lines. For international travel, Delta requires that all passengers under the age of fifteen use the Unaccompanied Minor Service. This service provides supervision from boarding until the child is met at their destination."
+    # # ]
 
         # make stream request
         client.send("START".encode())
