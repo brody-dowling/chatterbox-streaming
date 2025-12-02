@@ -22,6 +22,7 @@ from .inference.alignment_stream_analyzer import AlignmentStreamAnalyzer
 from ..utils import AttrDict
 
 from typing import Generator, Tuple, Optional
+import time
 
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,32 @@ class T3(nn.Module):
     @property
     def device(self):
         return self.speech_head.weight.device
+
+    def setup_model(self):
+        """
+        Setup model if not compiled.
+        """
+        #Default to None for English models, only create for multilingual.
+        alignment_stream_analyzer = None
+        # if self.hp.is_multilingual:
+        #     alignment_stream_analyzer = AlignmentStreamAnalyzer(
+        #         self.tfmr,
+        #         None,
+        #         text_tokens_slice=(len_cond, len_cond + text_tokens.size(-1)),
+        #         alignment_layer_idx=9,
+        #         eos_idx=self.hp.stop_speech_token,
+        #     )
+
+        patched_model = T3HuggingfaceBackend(
+            config=self.cfg,
+            llama=self.tfmr,
+            speech_enc=self.speech_emb,
+            speech_head=self.speech_head,
+            alignment_stream_analyzer=alignment_stream_analyzer,
+        )
+        
+        self.patched_model = patched_model
+        self.compiled = True
 
     def prepare_conditioning(self, t3_cond: T3Cond):
         """
@@ -400,8 +427,6 @@ class T3(nn.Module):
         *,
         t3_cond: T3Cond,
         text_tokens: torch.Tensor,
-        # initial_speech_tokens: Optional[Tensor]=None, NOTE -> Removing input since it is not implemented
-
         # misc conditioning
         # prepend_prompt_speech_tokens: Optional[Tensor]=None,  NOTE -> Removing input since it doesn't seem to be implemented
 
@@ -423,7 +448,7 @@ class T3(nn.Module):
     
         # Validate / sanitize inputs
         # assert prepend_prompt_speech_tokens is None, "not implemented" NOTE -> Doesn't seem to be implemented.
-        # _ensure_BOT_EOT(text_tokens, self.hp) # TODO This was intentionally not included in the original chatterbox streaming repo, so we should determine it's purpose before adding it.
+        _ensure_BOT_EOT(text_tokens, self.hp) # TODO This was intentionally not included in the original chatterbox streaming repo, so we should determine it's purpose before adding it.
         text_tokens = torch.atleast_2d(text_tokens).to(dtype=torch.long, device=self.device)
 
         # Default initial speech to a single start-of-speech token
@@ -436,31 +461,32 @@ class T3(nn.Module):
             speech_tokens=initial_speech_tokens,
             cfg_weight=cfg_weight
         )
+        
+        # NOTE -> For Real time applications we should not be compiling the model every time inference_stream is called, this should be done in setup
+        # self.compiled = False
+        # # Setup model if not compiled
+        # if not self.compiled:
+        #     # Default to None for English models, only create for multilingual
+        #     alignment_stream_analyzer = None
+        #     # if self.hp.is_multilingual:
+        #     #     raise ValueError("hp.is_multilingual should be set to false")
+        #     #     alignment_stream_analyzer = AlignmentStreamAnalyzer(
+        #     #         self.tfmr,
+        #     #         None,
+        #     #         text_tokens_slice=(len_cond, len_cond + text_tokens.size(-1)),
+        #     #         alignment_layer_idx=9,
+        #     #         eos_idx=self.hp.stop_speech_token,
+        #     #     )
 
-        # Setup model if not compiled
-        if not self.compiled:
-            # Default to None for English models, only create for multilingual
-            alignment_stream_analyzer = None
-            if self.hp.is_multilingual:
-                # NOTE -> Raise error if multilingual
-                raise ValueError("hp.is_multilingual should be set to false")
-                alignment_stream_analyzer = AlignmentStreamAnalyzer(
-                    self.tfmr,
-                    None,
-                    text_tokens_slice=(len_cond, len_cond + text_tokens.size(-1)),
-                    alignment_layer_idx=9,
-                    eos_idx=self.hp.stop_speech_token,
-                )
-
-            patched_model = T3HuggingfaceBackend(
-                config=self.cfg,
-                llama=self.tfmr,
-                speech_enc=self.speech_emb,
-                speech_head=self.speech_head,
-                alignment_stream_analyzer=alignment_stream_analyzer,
-            )
-            self.patched_model = patched_model
-            self.compiled = True
+        #     patched_model = T3HuggingfaceBackend(
+        #         config=self.cfg,
+        #         llama=self.tfmr,
+        #         speech_enc=self.speech_emb,
+        #         speech_head=self.speech_head,
+        #         alignment_stream_analyzer=alignment_stream_analyzer,
+        #     )
+        #     self.patched_model = patched_model
+        #     self.compiled = True
 
         device = embeds.device
 
@@ -477,7 +503,6 @@ class T3(nn.Module):
 
         # Track generated token ids; start with the BOS token
         generated_ids = bos_token.clone()
-        predicted = [] # To store the predicted tokens
         chunk_buffer = [] # to store chunk tokens
 
         # Instantiate logits processors
@@ -500,6 +525,7 @@ class T3(nn.Module):
 
         # ---- Generation Loop using kv_cache ----
         for i in range(max_new_tokens):
+
             logits_step = output.logits[:, -1, :]
 
             # CFG combine -> (1, V)
@@ -508,14 +534,7 @@ class T3(nn.Module):
             cfg = torch.as_tensor(cfg_weight, device=cond.device, dtype=cond.dtype)
             logits = cond + cfg * (cond - uncond)
 
-            # Apply alignment stream analyzer integrity checks
-            # NOTE -> Alignment stream analyzer shouldn't be initialized we're not using multilingual capabilities.
-            # if self.patched_model.alignment_stream_analyzer is not None:
-            #     if logits.dim() == 1:            # guard in case something upstream squeezed
-            #         logits = logits.unsqueeze(0) # (1, V)
-            #     # Pass the last generated token for repetition tracking
-            #     last_token = generated_ids[0, -1].item() if len(generated_ids[0]) > 0 else None
-            #     logits = self.patched_model.alignment_stream_analyzer.step(logits, next_token=last_token)  # (1, V)
+            # NOTE -> Removed alignment_stream_analyzer logic, since it is ommited for english models. 
 
             # Apply repetition penalty
             ids_for_proc = generated_ids[:1, ...]   # batch = 1
@@ -533,10 +552,8 @@ class T3(nn.Module):
             probs = torch.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1) # shape: (B, 1)
 
-            predicted.append(next_token)
             chunk_buffer.append(next_token)
             generated_ids = torch.cat([generated_ids, next_token], dim=1)
-
             # Check for EOS token
             if next_token.view(-1) == self.hp.stop_speech_token:
                 # Yield final chunk if buffer has tokens
@@ -568,3 +585,5 @@ class T3(nn.Module):
             # Update the kv_cache.
             past = output.past_key_values
 
+
+        

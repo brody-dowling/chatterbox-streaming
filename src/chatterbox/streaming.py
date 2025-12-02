@@ -1,10 +1,32 @@
-import numpy as np
+# metrics imports
+from dataclasses import dataclass
+import time
+from typing import Optional
+
+# streamer imports
 import queue
 import threading
+
+# tts generation imports
+import torch
+import numpy as np
 from chatterbox import ChatterboxTTS
-import time
-import soundfile as sf
+
+# server imports
+import struct
 import socket
+
+@dataclass
+class StreamingMetrics:
+    """Metrics for streaming TTS generation"""
+    networking_cost: Optional[float] = None
+    text_processing_cost: Optional[float] = None
+    generation_cost: Optional[float] = None
+    speech_processing_cost: Optional[float] = None
+    total_time: Optional[float] = None
+    total_audio_duration: Optional[float] = None
+    rtf: Optional[float] = None
+    total_chunks = 0
 
 class AudioBuffer:
     def __init__(
@@ -67,6 +89,7 @@ class AudioBuffer:
             return out
             
         # num_samples is greater than the number of samples in buffer
+        print(f"WARNING: {num_samples - available_samples} more samples requested than were available")
         out = self.buffer.copy()
         self.buffer = np.zeros(0, dtype=self.dtype)
         pad = np.zeros(num_samples - available_samples, dtype=self.dtype)
@@ -93,12 +116,16 @@ class ChatterboxStreamer:
     def __init__(
         self, 
         sample_rate: int = 24000,
-        fade_duration: float = 0.02,
-        dtype = np.float32
+        context_window: int = 50,
+        dtype = np.float32,
+        metrics = None
     ):
         self._model = self.load_model()
         self.sr = sample_rate
         self.dtype = np.float32
+        self.context_window = context_window
+
+        self.metrics = metrics
 
         self.request_queue = queue.Queue()
         self.audio_queue = queue.Queue(maxsize=10)
@@ -122,28 +149,27 @@ class ChatterboxStreamer:
         """
         self._running = True
         self._tts_thread.start()
+        self._model.setup_stream()
 
     def _tts_loop(self):
         while self._running:
-            text, start_time = self.request_queue.get()
-            latency_to_first_chunk = None
+            # Block for next request instead of polling
+            text = self.request_queue.get()
 
+            # check for shutdown signal
             if text is None:
-                # Shutdown signal
                 break
         
-            for chunk in self._model.generate_stream(text=text):
-                # Terminates tts generation if thread is stopped
+            # Perform tts generation
+            for chunk in self._model.generate_stream(text=text, metrics=self.metrics):
+                # Terminates if thread is stopped
                 if not self._running:
                     break
-            
-                if latency_to_first_chunk is None:
-                    latency_to_first_chunk = time.time() - start_time
-                    print(f"Latency to first chunk: {latency_to_first_chunk}")
 
-                # blocks if audio queue is full
+                # Blocks if audio queue is full
                 self.audio_queue.put(chunk)
             
+            # singal end-of-request
             self.audio_queue.put(self._EOS)
     
     def make_request(self, request):
@@ -151,28 +177,18 @@ class ChatterboxStreamer:
         Makes requests for tts audio generation.
         """
         self.request_queue.put(request)
-
-    def get_frame(self, num_samples: int) -> np.ndarray:
+    
+    def get_frame(self) -> np.ndarray:
         """
         Called from audio streaming side.
         """
-        req_finished = False
+        # Grabs chunk from queue (blocks until data arrives)
+        chunk = self.audio_queue.get()
 
-        while True:
-            try:
-                chunk = self.audio_queue.get_nowait()
-            except queue.Empty:
-                break
-                
-            if chunk is self._EOS:
-                # TODO Add end of utterance logic here
-                req_finished = True
-                continue
-            
-            self.buffer.add_chunk(chunk)
-        
-        # Return audio frame
-        return self.buffer.get_samples(num_samples), req_finished
+        if chunk is self._EOS:
+            return None, True
+
+        return chunk, False
 
     def stop(self):
         """
@@ -181,9 +197,6 @@ class ChatterboxStreamer:
         self._running = False
         self.request_queue.put(None)
         self._tts_thread.join(timeout=1.0)
-
-    def available_samples(self) -> int:
-        return self.buffer.available_samples()
 
     def load_model(self):
         """Loads chatterbox model for tts generation"""
@@ -198,8 +211,9 @@ class ChatterboxStreamer:
 
 
 def main():
-    test_request = "Hi, I'm Delta's AI assistant! How can I help you today?"
+    request = "Active-duty U S military personnel get special baggage allowances with Delta. When traveling on orders or for personal travel, you’ll receive baggage fee exceptions and extra checked bag benefits. These allowances apply to all branches, including the Marine Corps, Army, Air Force, Space Force, Navy, and Coast Guard. There may be some regional weight or embargo restrictions. Would you like me to text you a link with the full details for military baggage policies?" 
 
+    # stream configs
     sample_rate = 24000
     frame_size = 1024
     frame_duration = frame_size / sample_rate
@@ -212,6 +226,13 @@ def main():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.bind((HOST, PORT))
     server.listen(1)
+    print("waiting for connection...")
+    client, addr = server.accept()
+    print(f"client {addr} connected to port {PORT}\n")
+
+    with client:
+        # Setup metrics
+        metrics = StreamingMetrics()
 
     # waiting for client connection
     print("waiting on client connection...")
@@ -252,28 +273,53 @@ def main():
     # #     "Yes, there are specific restrictions for minors and unaccompanied minors traveling internationally with Delta Air Lines. For international travel, Delta requires that all passengers under the age of fifteen use the Unaccompanied Minor Service. This service provides supervision from boarding until the child is met at their destination."
     # # ]
 
-
-
-    # audio = np.zeros(0, dtype=dtype)
-    # start_time = time.time()
-    # streamer.make_request((request, start_time))
-    # terminate = False
-
-    # while True:
-    #     frame, request_finished = streamer.get_frame(frame_size)
-    #     audio = np.concatenate([audio, frame])
-    #     time.sleep(frame_duration)
-
-    #     if request_finished: 
-    #         print(f"Total generation time: {time.time() - start_time}")
-    #         terminate = True
+        # make stream request
+        client.send("START".encode())
+        start_time = time.time()
+        stream.make_request(request)
         
-    #     if streamer.available_samples() == 0 and terminate:
-    #         break
+        while True:
+            # update networking cost metrics
+            metrics.networking_cost += time.time() - ref_time
+
+            # BLOCKS when no available chunks
+            chunk, request_complete = stream.get_frame()
+            
+            # Signal to terminate thread and close socket
+            if chunk is None:
+                time.sleep(5.0) # wait for audio to finish streaming
+                break
+
+            # set ref time for networking cost calculation
+            ref_time = time.time()
+
+            # Update total audio duration with duration of curr chunk
+            metrics.total_audio_duration += len(chunk) / sample_rate
+            
+            # Package and send all data
+            payload = chunk.tobytes(order="C")
+            header = struct.pack("!I", len(payload))
+            client.sendall(header + payload)
+
         
-    
-    # print(f"Total audio play time: {time.time() - start_time}")
-    # sf.write("stream_snapshot.wav", audio, sample_rate)
+        print("\nPROCESS SPECIFIC TIME COSTS")
+        print(f"Networking: {metrics.networking_cost}")
+        print(f"Text Processing: {metrics.text_processing_cost}")
+        print(f"Token Generation: {metrics.generation_cost}")
+        print(f"Speech Processing: {metrics.speech_processing_cost}")
+
+        print("\nPER CHUNK TIME COSTS")
+        print(f"Generation Cost Per Chunk: {metrics.generation_cost / metrics.total_chunks}")
+        print(f"Processing Cost Per Chunk: {metrics.speech_processing_cost / metrics.total_chunks}")
+        
+        print("\nTOTAL TIME COSTS")
+        total_time = metrics.networking_cost + metrics.text_processing_cost + metrics.generation_cost + metrics.speech_processing_cost
+        print(f"Calculated Total Time: {total_time}")
+        print(f"Actual Total Time: {time.time() - start_time - 5.0}")
+        print(f"Total Audio Duration: {metrics.total_audio_duration}")
+        print(f"RTF: {total_time / metrics.total_audio_duration}")
+    stream.stop()
+    client.close()
 
 if __name__ == "__main__":
     main()
