@@ -27,7 +27,6 @@ import multiprocessing
 import socket
 import struct
 import soundfile as sf
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
 REPO_ID = "ResembleAI/chatterbox"
@@ -348,7 +347,7 @@ class ChatterboxTTS:
         token_buffer,
         all_tokens_so_far,
         context_window,
-        prev_tail
+        prev_chunk
     ):
         # Build tokens_to_process by including a context window
         if len(all_tokens_so_far) > 0:
@@ -368,7 +367,7 @@ class ChatterboxTTS:
         speech_tokens = speech_tokens.to(self.device)
 
         if len(speech_tokens) == 0:
-            return None, None, False
+            return None, False
 
         # Run S3Gen inference to get a waveform (1 × T)
         wav, _ = self.s3gen.inference(
@@ -387,36 +386,43 @@ class ChatterboxTTS:
         if context_length > 0:
             samples_per_token = len(wav) / len(speech_tokens)
             skip_samples = int(context_length * samples_per_token)
-            audio_chunk = wav[skip_samples:]
+            new_chunk = wav[skip_samples:]
         else:
-            audio_chunk = wav
+            new_chunk = wav
 
-        audio_chunk_size = len(audio_chunk)
+        audio_chunk_size = len(new_chunk)
         if audio_chunk_size == 0:
-            return None, None, False
+            return None, False
 
-        # First chunk, nothing to fade between
-        if prev_tail is None:
-            fade_len = min(self.fade_samples, audio_chunk_size)
-            new_tail = audio_chunk[-fade_len:].copy()
-            return audio_chunk[:-fade_len], new_tail, True
+        # Reconstruct transition signal between chunks
+        x_n0 = prev_chunk[-1]
+        x_n1 = new_chunk[0]
+        trans_chunk = np.linspace(x_n0, x_n1, num=self.fade_samples)
+
+        # # First chunk, nothing to fade between
+        # if prev_tail is None:
+        #     fade_len = min(self.fade_samples, audio_chunk_size)
+        #     new_tail = audio_chunk[-fade_len:].copy()
+        #     return audio_chunk[:-fade_len], new_tail, True
         
-        fade_len = min(self.fade_samples, audio_chunk_size, len(prev_tail))
-        new_tail = audio_chunk[-fade_len:].copy()
-        head = audio_chunk[:fade_len].copy()
+        # fade_len = min(self.fade_samples, audio_chunk_size, len(prev_tail))
+        # new_tail = audio_chunk[-fade_len:].copy()
+        # head = audio_chunk[:fade_len].copy()
 
-        if fade_len != self.fade_samples:
-            # Buffer or chunk is smaller than fade_samples
-            fade_out = np.linspace(1.0, 0, fade_len, endpoint=True, dtype=self.dtype)
-            fade_in = 1.0 - fade_out
-            fade_chunk = prev_tail * fade_out + head * fade_in
-        else:
-            # fade_samples is smaller than buffer and chunk size
-            fade_chunk = prev_tail * self.fade_out + head * self.fade_in
+        # if fade_len != self.fade_samples:
+        #     # Buffer or chunk is smaller than fade_samples
+        #     fade_out = np.linspace(1.0, 0, fade_len, endpoint=True, dtype=self.dtype)
+        #     fade_in = 1.0 - fade_out
+        #     fade_chunk = prev_tail * fade_out + head * fade_in
+        # else:
+        #     # fade_samples is smaller than buffer and chunk size
+        #     fade_chunk = prev_tail * self.fade_out + head * self.fade_in
 
-        faded_chunk = np.concatenate([fade_chunk, audio_chunk[fade_len:-fade_len]])
+        faded_chunk = np.concatenate([fade_chunk, new_chunk])
 
-        return faded_chunk, new_tail, True
+        return faded_chunk, True
+
+    
 
     def generate_chunks(
         self,

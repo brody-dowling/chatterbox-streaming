@@ -83,7 +83,7 @@ def process_chunks(
     context_window: int,
     metrics
 ):
-    prev_tail = None # Keeps track of the previous chunk tail for cross fading
+    prev_chunk = None # Keeps track of the previous chunk tail for cross fading
     all_tokens_processed = [] # Stores previous tokens to fill context window
     audio = np.zeros(0, dtype=np.float32)
 
@@ -94,7 +94,7 @@ def process_chunks(
         # Check for end of sentence signal
         if isinstance(token_chunk, type(EOS)) and token_chunk.name == "EOS":
             all_tokens_processed = []
-            prev_tail = None
+            prev_chunk = None
             continue
             
         # Stream termiate signal
@@ -105,25 +105,26 @@ def process_chunks(
         token_chunk = token_chunk[0]
 
         # Process chunk TODO-> consider only using the previous chunk for each context window cut down on np cat operations
-        audio_chunk, new_tail, success = model._process_token_buffer(
+        audio_chunk, success = model._process_token_buffer(
             token_buffer=token_chunk,
             all_tokens_so_far=all_tokens_processed,
             context_window=context_window,
-            prev_tail=prev_tail
+            prev_chunk=prev_chunk
         )
 
         if success:
             if metrics.first_chunk_time is None:
                 metrics.first_chunk_time = time.time()
-            metrics.audio_duration += len(audio_chunk) / SAMPLE_RATE
 
-            audio = np.concatenate([audio, audio_chunk])
             # Send audio over TCP
             data = audio_chunk.tobytes()
             conn.sendall(data)
+            
+            # Reconstruct
+            audio = np.concatenate([audio, audio_chunk])
 
-            # Store new tail
-            prev_tail = new_tail
+            # Store chunk
+            prev_chunk = audio_chunk
 
         # Store new tokens
         if len(all_tokens_processed) == 0:
