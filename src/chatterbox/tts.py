@@ -395,32 +395,33 @@ class ChatterboxTTS:
             return None, False
 
         # Reconstruct transition signal between chunks
+        if prev_chunk is None:
+            return new_chunk, True
+
         x_n0 = prev_chunk[-1]
         x_n1 = new_chunk[0]
-        trans_chunk = np.linspace(x_n0, x_n1, num=self.fade_samples)
-
-        # # First chunk, nothing to fade between
-        # if prev_tail is None:
-        #     fade_len = min(self.fade_samples, audio_chunk_size)
-        #     new_tail = audio_chunk[-fade_len:].copy()
-        #     return audio_chunk[:-fade_len], new_tail, True
-        
-        # fade_len = min(self.fade_samples, audio_chunk_size, len(prev_tail))
-        # new_tail = audio_chunk[-fade_len:].copy()
-        # head = audio_chunk[:fade_len].copy()
-
-        # if fade_len != self.fade_samples:
-        #     # Buffer or chunk is smaller than fade_samples
-        #     fade_out = np.linspace(1.0, 0, fade_len, endpoint=True, dtype=self.dtype)
-        #     fade_in = 1.0 - fade_out
-        #     fade_chunk = prev_tail * fade_out + head * fade_in
-        # else:
-        #     # fade_samples is smaller than buffer and chunk size
-        #     fade_chunk = prev_tail * self.fade_out + head * self.fade_in
-
+        fade_chunk = np.linspace(x_n0, x_n1, num=self.fade_samples)
         faded_chunk = np.concatenate([fade_chunk, new_chunk])
-
         return faded_chunk, True
+
+
+    def sinc_interpolation(x: np.ndarray, s: np.ndarray, u: np.ndarray) -> np.ndarray:
+            """Whittaker–Shannon or sinc or bandlimited interpolation.
+            Args:
+                x (NDArray): signal to be interpolated, can be 1D or 2D
+                s (NDArray): time points of x (*s* for *samples*) 
+                u (NDArray): time points of y (*u* for *upsampled*)
+            Returns:
+                NDArray: interpolated signal at time points *u*
+            Reference:
+                This code is based on https://gist.github.com/endolith/1297227
+                and the comments therein.
+            TODO:
+                * implement FFT based interpolation for speed up
+            """
+            sinc_ = np.sinc((u - s[:, None])/(s[1]-s[0]))
+
+            return np.dot(x, sinc_)
 
     
 
@@ -543,7 +544,7 @@ class ChatterboxTTS:
             text_tokens = F.pad(text_tokens, (0, 1), value=eot)
 
             all_tokens_processed = []  # Keep track of all tokens processed so far
-            prev_tail = None
+            prev_chunk = None
 
             with torch.inference_mode():
                 # Stream speech tokens
@@ -562,13 +563,13 @@ class ChatterboxTTS:
                     token_chunk = token_chunk[0]
 
                     # Process each chunk immediately
-                    audio_tensor, new_tail, success = self._process_token_buffer(
-                        token_chunk, all_tokens_processed, context_window, prev_tail
+                    new_chunk, success = self._process_token_buffer(
+                        token_chunk, all_tokens_processed, context_window, prev_chunk
                     )
 
                     if success:
-                        prev_tail = new_tail
-                        yield audio_tensor
+                        prev_chunk = new_chunk
+                        yield new_chunk
 
                     # Update all_tokens_processed with the new tokens
                     if len(all_tokens_processed) == 0:
