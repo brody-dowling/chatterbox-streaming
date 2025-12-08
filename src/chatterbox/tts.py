@@ -27,6 +27,7 @@ import multiprocessing
 import socket
 import struct
 import soundfile as sf
+import matplotlib.pyplot as plt
 
 
 REPO_ID = "ResembleAI/chatterbox"
@@ -347,7 +348,8 @@ class ChatterboxTTS:
         token_buffer,
         all_tokens_so_far,
         context_window,
-        prev_chunk
+        prev_tail,
+        chunk_num
     ):
         # Build tokens_to_process by including a context window
         if len(all_tokens_so_far) > 0:
@@ -395,17 +397,47 @@ class ChatterboxTTS:
             return None, False
 
         # Reconstruct transition signal between chunks
-        if prev_chunk is None:
-            return new_chunk, True
+        new_tail = new_chunk[-self.fade_samples:].copy()
+        new_chunk = new_chunk[:-self.fade_samples].copy()
 
-        x_n0 = prev_chunk[-1]
-        x_n1 = new_chunk[0]
-        fade_chunk = np.linspace(x_n0, x_n1, num=self.fade_samples)
-        faded_chunk = np.concatenate([fade_chunk, new_chunk])
-        return faded_chunk, True
+        # First chunk of audio
+        if prev_tail is None:
+            return new_chunk, new_tail, True
+
+        new_head = new_chunk[:self.fade_samples]
+        x = np.concatenate([prev_tail, new_head])
+        t = np.linspace(0, len(x)/S3GEN_SR, len(x), endpoint=False)
+        
+        x_sinc = self.sinc_interpolation(x, t, t)
+        
+        new_chunk = np.concatenate([x_sinc, new_chunk[self.fade_samples:]])
+        return new_chunk, new_tail, True
+ 
+        # # Prev chunk with tail cut
+        # x_prev = prev_tail[-1000:-self.fade_samples].copy()
+        # x_prev_len = len(x_prev)
+        # x_prev_dur = x_prev_len / S3GEN_SR
+        # t_prev = np.linspace(0, x_prev_dur, x_prev_len, endpoint=False)
+
+        # # inter chunk 
+        # t_f = np.linspace(x_prev_dur, x_prev_dur + x_f_dur, x_f_len, endpoint=False)
+
+        # # New chunk with head cut
+        # x_new = new_chunk[self.fade_samples:1000].copy()
+        # x_new_len = len(x_new)
+        # x_new_dur = x_new_len / S3GEN_SR
+        # t_new = np.linspace(x_prev_dur + x_f_dur, x_prev_dur + x_f_dur + x_new_dur, x_new_len, endpoint=False)
+
+        # plt.plot(t_prev, x_prev, linestyle='-', linewidth=0.5, color='b')
+        # plt.plot(t_f, x_f, linestyle='-', linewidth=0.5, color='r')
+        # plt.plot(t_new, x_new, linestyle='-', linewidth=0.5, color='b')
+        # plt.grid(True)
+        # plt.savefig(f'chunk_{chunk_num}.png', dpi = 300, bbox_inches='tight')
+
+        #return new_chunk, True
 
 
-    def sinc_interpolation(x: np.ndarray, s: np.ndarray, u: np.ndarray) -> np.ndarray:
+    def sinc_interpolation(self, x: np.ndarray, s: np.ndarray, u: np.ndarray) -> np.ndarray:
             """Whittaker–Shannon or sinc or bandlimited interpolation.
             Args:
                 x (NDArray): signal to be interpolated, can be 1D or 2D
@@ -544,7 +576,8 @@ class ChatterboxTTS:
             text_tokens = F.pad(text_tokens, (0, 1), value=eot)
 
             all_tokens_processed = []  # Keep track of all tokens processed so far
-            prev_chunk = None
+            prev_tail = None
+            chunk_num = 0
 
             with torch.inference_mode():
                 # Stream speech tokens
@@ -563,12 +596,13 @@ class ChatterboxTTS:
                     token_chunk = token_chunk[0]
 
                     # Process each chunk immediately
-                    new_chunk, success = self._process_token_buffer(
-                        token_chunk, all_tokens_processed, context_window, prev_chunk
+                    new_chunk, new_tail, success = self._process_token_buffer(
+                        token_chunk, all_tokens_processed, context_window, prev_tail, chunk_num
                     )
+                    chunk_num += 1
 
                     if success:
-                        prev_chunk = new_chunk
+                        prev_tail = new_tail
                         yield new_chunk
 
                     # Update all_tokens_processed with the new tokens
