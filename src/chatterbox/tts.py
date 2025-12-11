@@ -27,7 +27,6 @@ import multiprocessing
 import socket
 import struct
 import soundfile as sf
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
 REPO_ID = "ResembleAI/chatterbox"
@@ -387,36 +386,125 @@ class ChatterboxTTS:
         if context_length > 0:
             samples_per_token = len(wav) / len(speech_tokens)
             skip_samples = int(context_length * samples_per_token)
-            audio_chunk = wav[skip_samples:]
+            new_chunk = wav[skip_samples:]
         else:
-            audio_chunk = wav
+            new_chunk = wav
 
-        audio_chunk_size = len(audio_chunk)
-        if audio_chunk_size == 0:
+        if len(new_chunk) == 0:
             return None, None, False
 
-        # First chunk, nothing to fade between
+        crossfaded_chunk, new_tail = self.linear_cross_fading(prev_tail, new_chunk, self.fade_samples)
+
+        # crossfaded_chunk, new_tail = self.exponential_cross_fading(prev_tail, new_chunk, self.fade_samples)
+        return crossfaded_chunk, new_tail, True
+
+    def linear_cross_fading(
+        self,
+        prev_tail,
+        new_chunk,
+        fade_samples
+    ):
         if prev_tail is None:
-            fade_len = min(self.fade_samples, audio_chunk_size)
-            new_tail = audio_chunk[-fade_len:].copy()
-            return audio_chunk[:-fade_len], new_tail, True
-        
-        fade_len = min(self.fade_samples, audio_chunk_size, len(prev_tail))
-        new_tail = audio_chunk[-fade_len:].copy()
-        head = audio_chunk[:fade_len].copy()
+            return new_chunk[:-fade_samples], new_chunk[-fade_samples:]
 
-        if fade_len != self.fade_samples:
-            # Buffer or chunk is smaller than fade_samples
-            fade_out = np.linspace(1.0, 0, fade_len, endpoint=True, dtype=self.dtype)
-            fade_in = 1.0 - fade_out
-            fade_chunk = prev_tail * fade_out + head * fade_in
-        else:
-            # fade_samples is smaller than buffer and chunk size
-            fade_chunk = prev_tail * self.fade_out + head * self.fade_in
+        # Ensure fade is not longer than either chunk
+        fade_len = min(fade_samples, prev_tail.size, new_chunk.size)
 
-        faded_chunk = np.concatenate([fade_chunk, audio_chunk[fade_len:-fade_len]])
+        if fade_len == 0:
+            # Nothing to fade — just concatenate
+            return np.concatenate([prev_tail, new_chunk])
 
-        return faded_chunk, new_tail, True
+        # Tail of previous chunk
+        tail = prev_tail[-fade_len:].copy()
+
+        # Head of new chunk
+        head = new_chunk[:fade_len].copy()
+
+        # Linear fade-out (prev chunk goes 1 → 0)
+        fade_out = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
+
+        # Linear fade-in (new chunk goes 0 → 1)
+        fade_in = np.linspace(0.0, 1.0, fade_len, dtype=np.float32)
+
+        # Crossfaded overlap region
+        blended = tail * fade_out + head * fade_in
+
+        # Combine:
+        out = np.concatenate([
+            blended,
+            new_chunk[fade_len:]
+        ])
+
+        return out[:-fade_samples], out[-fade_samples:]
+
+    def exponential_cross_fading(
+        self,
+        prev_tail,
+        new_chunk,
+        fade_samples,
+        curve: float = 2.0
+    ):
+        if prev_tail is None:
+            audio_out = new_chunk[:-fade_samples].copy()
+            new_tail = new_chunk[-fade_samples:].copy()
+            return audio_out, new_tail
+
+        fade_len = min(fade_samples, prev_tail.size, new_chunk.size)
+
+        if fade_len == 0:
+            # Nothing to fade — just concatenate
+            audio_out = np.concatenate([prev_tail, new_chunk])
+            new_tail = audio_out[-fade_samples:].copy()
+            return audio_out[:-fade_samples].copy(), new_tail
+
+        tail = prev_tail[-fade_len:]
+        head = new_chunk[:fade_len]
+
+        # --- Exponential-decay crossfade curves ---
+        # t goes from 0 to 1 across the fade region
+        t = np.linspace(0.0, 1.0, fade_len, dtype=np.float32)
+
+        # Raw exponential decay: 1 -> exp(-curve)
+        raw = np.exp(-curve * t)
+
+        # Normalize so that fade_out goes exactly from 1 -> 0
+        # fade_out[0] = 1, fade_out[-1] = 0
+        fade_out = (raw - raw[-1]) / (raw[0] - raw[-1])
+
+        # Complementary fade-in (ensures unity gain: fade_out + fade_in = 1)
+        fade_in = 1.0 - fade_out
+
+        # Blend overlap region
+        blended = tail * fade_out + head * fade_in
+
+        # Don’t re-emit prev_tail (it was already played previously)
+        out = np.concatenate([blended, new_chunk[fade_len:]])
+
+        audio_out = out[:-fade_samples].copy()
+        new_tail = out[-fade_samples:].copy()
+        return audio_out, new_tail
+
+    def hann_cross_fading(
+        self,
+        prev_tail,
+        new_chunk,
+        fade_samples
+    ):
+        new_head = new_chunk[:fade_samples]
+
+        window = np.hanning(2 * fade_samples).astype(np.float32)
+
+        fade_in = window[:fade_samples]
+        fade_out = window[fade_samples:]
+
+        cross = prev_tail * fade_out + new_head * fade_in
+
+        out = np.concatenate([cross, new_chunk[fade_samples:]])
+
+        return out
+
+    
+
 
     def generate_chunks(
         self,
