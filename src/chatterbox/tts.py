@@ -309,6 +309,12 @@ class ChatterboxTTS:
         fade_duration: int = 1024,
     ):
         """
+        Performs model setup prior to inference request.
+
+        Args:
+            audio_prompt_path (str): Path to audio prompt
+            exaggeration (float): Emotion exaggeration factor
+            fade_duration (int): Length in samples to apply equal part cross-fade.
         """
         # Prepare audio prompt if provided
         if audio_prompt_path:
@@ -330,6 +336,7 @@ class ChatterboxTTS:
 
         # Setup cross-fading configs
         self.fade_samples = fade_duration
+
     def _process_token_buffer(
         self,
         token_buffer,
@@ -376,9 +383,10 @@ class ChatterboxTTS:
         if new_chunk.size == 0:
             return None, None, False
 
-        #crossfaded_chunk, new_tail = self.linear_cross_fading(prev_tail, new_chunk, self.fade_samples)
-        # crossfaded_chunk, new_tail = self.exponential_cross_fading(prev_tail, new_chunk, self.fade_samples)
-        crossfaded_chunk, new_tail = self.hann_cross_fading(prev_tail, new_chunk, self.fade_samples)
+        crossfaded_chunk, new_tail = self.linear_cross_fading(prev_tail, new_chunk, self.fade_samples)
+        # crossfaded_chunk, new_tail = self.hann_cross_fading(prev_tail, new_chunk, self.fade_samples)
+        # crossfaded_chunk, new_tail = self.linear_fade_in(prev_tail, new_chunk, self.fade_samples)
+
         return crossfaded_chunk, new_tail, True
 
     def linear_cross_fading(
@@ -387,38 +395,88 @@ class ChatterboxTTS:
         new_chunk,
         fade_samples
     ):
-        if prev_tail is None:
-            return new_chunk[:-fade_samples], new_chunk[-fade_samples:]
+        """
+        Applies linear equal-parts cross-fading between audio chunks.
 
-        # Ensure fade is not longer than either chunk
+        Args:
+            prev_tail: Tail of the previously generated chunk.
+            new_chunk: New audio chunk
+            fade_samples: Number of samples to apply crossfade over
+        
+        Returns:
+            np.ndarray: Audio Chunk that cross fades new chunk with the tail of the old chunk.
+        """
+        if prev_tail is None:
+            audio_out = new_chunk[:-fade_samples].copy()
+            new_tail = new_chunk[-fade_samples:].copy()
+            return audio_out, new_tail
+
+
+        # Calculate available fade_len
         fade_len = min(fade_samples, prev_tail.size, new_chunk.size)
 
+        # prev_tail or new_chunk too small for cross-fading
         if fade_len == 0:
-            # Nothing to fade — just concatenate
-            return np.concatenate([prev_tail, new_chunk])
+            audio_out = np.concatenate([prev_tail, new_chunk])
+            new_tail = audio_out[-fade_samples:].copy()
+            return audio_out.copy(), new_tail
 
-        # Tail of previous chunk
-        tail = prev_tail[-fade_len:].copy()
-
-        # Head of new chunk
-        head = new_chunk[:fade_len].copy()
-
-        # Linear fade-out (prev chunk goes 1 → 0)
+        # Linear fade in/out
         fade_out = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
-
-        # Linear fade-in (new chunk goes 0 → 1)
         fade_in = np.linspace(0.0, 1.0, fade_len, dtype=np.float32)
 
-        # Crossfaded overlap region
-        blended = tail * fade_out + head * fade_in
+        # Compute crossfade chunk
+        trial = prev_tail[-fade_len:]
+        head = new_chunk[:fade_len]
+        cross = trial * fade_out + head * fade_in
 
-        # Combine:
-        out = np.concatenate([
-            blended,
-            new_chunk[fade_len:]
-        ])
+        audio_out = np.concatenate([prev_tail[:-fade_len], cross, new_chunk[fade_len:]])
+        new_tail = audio_out[-fade_samples:].copy()
+        return audio_out[:-fade_samples], new_tail
 
-        return out[:-fade_samples], out[-fade_samples:]
+    def linear_fade_in(
+        self,
+        prev_tail,
+        new_chunk,
+        fade_samples
+    ):
+        """
+        Applies linear fade in only on newly generated chunk
+
+        Args:
+            prev_tail: Tail of the previously generated chunk.
+            new_chunk: New audio chunk
+            fade_samples: Number of samples to apply crossfade over
+        
+        Returns:
+            np.ndarray: Audio Chunk that cross fades new chunk with the tail of the old chunk.
+        """
+        if prev_tail is None:
+            audio_out = new_chunk[:-fade_samples].copy()
+            new_tail = new_chunk[-fade_samples:].copy()
+            return audio_out, new_tail
+
+
+        # Calculate available fade_len
+        fade_len = min(fade_samples, prev_tail.size, new_chunk.size)
+
+        # prev_tail or new_chunk too small for cross-fading
+        if fade_len == 0:
+            audio_out = np.concatenate([prev_tail, new_chunk])
+            new_tail = audio_out[-fade_samples:].copy()
+            return audio_out.copy(), new_tail
+
+        # Linear fade in/out
+        fade_out = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
+        fade_in = np.linspace(0.0, 1.0, fade_len, dtype=np.float32)
+
+        # Compute crossfade chunk
+        head = new_chunk[:fade_len]
+        cross = head * fade_in
+
+        audio_out = np.concatenate([prev_tail, cross, new_chunk[fade_len:]])
+        new_tail = audio_out[-fade_samples:].copy()
+        return audio_out[:-fade_samples], new_tail
 
     def hann_cross_fading(
         self,
@@ -450,7 +508,7 @@ class ChatterboxTTS:
         if fade_len == 0:
             audio_out = np.concatenate([prev_tail, new_chunk])
             new_tail = audio_out[-fade_samples:].copy()
-            return audio_out[:-fade_samples].copy(), new_tail
+            return audio_out.copy(), new_tail
         
         # Create hanning window
         window = np.hanning(2 * fade_len).astype(np.float32)
@@ -478,8 +536,7 @@ class ChatterboxTTS:
         chunk_size: int = 25,  # Tokens per chunk
     ) -> Generator[Tuple[torch.Tensor], None, None]:
         """
-        Streaming version of generate that yields unprocessed audio chunks as they are generated.
-        This funciton is intended to be used in the server/client multiprocessing implemenation in server.py.
+        Streaming version of generate that yields unprocessed audio chunks as they are generated, inteded for use in the server/client proof of concept.
         
         Args:
             text: Input text to synthesize

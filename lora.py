@@ -39,7 +39,7 @@ import time
 from collections import deque
 
 # Hardcoded configuration
-AUDIO_DATA_DIR = "src/chatterbox-streaming/audio_data"
+AUDIO_DATA_DIR = "./audio_data"
 BATCH_SIZE = 1
 EPOCHS = 2
 LEARNING_RATE = 2e-5  
@@ -51,7 +51,7 @@ LORA_ALPHA = 64
 LORA_DROPOUT = 0.05  
 GRADIENT_ACCUMULATION_STEPS = 1
 SAVE_EVERY_N_STEPS = 200
-CHECKPOINT_DIR = "src/chatterbox-streaming/checkpoints_lora"
+CHECKPOINT_DIR = "checkpoints_lora"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 WHISPER_MODEL = "openai/whisper-large-v3-turbo"
 MAX_TEXT_LENGTH = 1000
@@ -717,7 +717,7 @@ def main():
     print(f"Device: {DEVICE}")
     
     # Initialize metrics tracker
-    metrics_tracker = MetricsTracker(save_path="src/chatterbox-streaming/training_metrics.png", update_interval=2.0)
+    metrics_tracker = MetricsTracker(save_path="training_metrics.png", update_interval=2.0)
     
     # Load Whisper model
     print("Loading Whisper model...")

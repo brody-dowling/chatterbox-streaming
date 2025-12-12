@@ -1,22 +1,8 @@
+# Chatterbox-Streaming TTS
+The orginal Chatterbox repository from Resemble AI can be found here: https://github.com/resemble-ai/chatterbox
+The Chatterbox box streaming fork which provided much of the streaming framework can be found here: https://github.com/davidbrowne17/chatterbox-streaming 
 
-<img width="1200" height="600" alt="Chatterbox-Multilingual" src="https://www.resemble.ai/wp-content/uploads/2025/09/Chatterbox-Multilingual-1.png" />
-
-# Chatterbox TTS
-
-[![Alt Text](https://img.shields.io/badge/listen-demo_samples-blue)](https://resemble-ai.github.io/chatterbox_demopage/)
-[![Alt Text](https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-sm.svg)](https://huggingface.co/spaces/ResembleAI/Chatterbox)
-[![Alt Text](https://static-public.podonos.com/badges/insight-on-pdns-sm-dark.svg)](https://podonos.com/resembleai/chatterbox)
-[![Discord](https://img.shields.io/discord/1377773249798344776?label=join%20discord&logo=discord&style=flat)](https://discord.gg/rJq9cRJBJ6)
-
-_Made with ♥️ by <a href="https://resemble.ai" target="_blank"><img width="100" alt="resemble-logo-horizontal" src="https://github.com/user-attachments/assets/35cf756b-3506-4943-9c72-c05ddfa4e525" /></a>
-
-We're excited to introduce **Chatterbox Multilingual**, [Resemble AI's](https://resemble.ai) first production-grade open source TTS model supporting **23 languages** out of the box. Licensed under MIT, Chatterbox has been benchmarked against leading closed-source systems like ElevenLabs, and is consistently preferred in side-by-side evaluations.
-
-Whether you're working on memes, videos, games, or AI agents, Chatterbox brings your content to life across languages. It's also the first open source TTS model to support **emotion exaggeration control** with robust **multilingual zero-shot voice cloning**. Try the english only version now on our [English Hugging Face Gradio app.](https://huggingface.co/spaces/ResembleAI/Chatterbox). Or try the multilingual version on our [Multilingual Hugging Face Gradio app.](https://huggingface.co/spaces/ResembleAI/Chatterbox-Multilingual-TTS).
-
-If you like the model but need to scale or tune it for higher accuracy, check out our competitively priced TTS service (<a href="https://resemble.ai">link</a>). It delivers reliable performance with ultra-low latency of sub 200ms—ideal for production use in agents, applications, or interactive media.
-
-# Key Details
+## Key Details
 - Multilingual, zero-shot TTS supporting 23 languages
 - SoTA zeroshot English TTS
 - 0.5B Llama backbone
@@ -25,11 +11,11 @@ If you like the model but need to scale or tune it for higher accuracy, check ou
 - Trained on 0.5M hours of cleaned data
 - Watermarked outputs
 - Easy voice conversion script
-- [Outperforms ElevenLabs](https://podonos.com/resembleai/chatterbox)
 
-# Supported Languages 
-Arabic (ar) • Danish (da) • German (de) • Greek (el) • English (en) • Spanish (es) • Finnish (fi) • French (fr) • Hebrew (he) • Hindi (hi) • Italian (it) • Japanese (ja) • Korean (ko) • Malay (ms) • Dutch (nl) • Norwegian (no) • Polish (pl) • Portuguese (pt) • Russian (ru) • Swedish (sv) • Swahili (sw) • Turkish (tr) • Chinese (zh)
-# Tips
+## LoRA Fine-Tuning
+To fine-tune Chatterbox all you need are some wav audio files with the speaker voice you want to train, just the raw wavs. Place them in the `audio_data` folder and run `lora.py`. You can configure the exact training params such as batch size, number of epochs and learning rate by modifying the values at the top of `lora.py`. You will need a CUDA gpu with at least 18gb of vram depending on your dataset size and training params. You can monitor the training metrics via the dynamic png created called `training_metrics.png`. This contains various graphs to help you track the training progress. Checkpoints and merged model will be saved to the a folder named `checkpoints_dir`. If you want to try a checkpoint you can use the `loadandmergecheckpoint.py` (make sure to set the same R and Alpha values as you used in the training). If you are using the TTS evaluation framework, once you have the path local path to your merged model assign it to `tuned_model_path` in `config.toml`.
+
+## Streaming Parameter Tips
 - **General Use (TTS and Voice Agents):**
   - Ensure that the reference clip matches the specified language tag. Otherwise, language transfer outputs may inherit the accent of the reference clip’s language. To mitigate this, set `cfg_weight` to `0`.
   - The default settings (`exaggeration=0.5`, `cfg_weight=0.5`) work well for most prompts across all languages.
@@ -39,53 +25,44 @@ Arabic (ar) • Danish (da) • German (de) • Greek (el) • English (en) • 
   - Try lower `cfg_weight` values (e.g. `~0.3`) and increase `exaggeration` to around `0.7` or higher.
   - Higher `exaggeration` tends to speed up speech; reducing `cfg_weight` helps compensate with slower, more deliberate pacing.
 
-
-# Installation
-```shell
-pip install chatterbox-tts
-```
-
-Alternatively, you can install from source:
-```shell
-# conda create -yn chatterbox python=3.11
-# conda activate chatterbox
-
-git clone https://github.com/resemble-ai/chatterbox.git
-cd chatterbox
-pip install -e .
-```
-We developed and tested Chatterbox on Python 3.11 on Debian 11 OS; the versions of the dependencies are pinned in `pyproject.toml` to ensure consistency. You can modify the code or dependencies in this installation mode.
-
-# Usage
+## Modifications and Optimizations
+### Streaming Setup
+In reviewing the framework, there were many processes that could be brought outside the inference request method and precomputed. Now before calling `generate_stream()`, you must call the `setup_model()` method. Here is an example implementation:
 ```python
-import torchaudio as ta
-from chatterbox.tts import ChatterboxTTS
-from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+import torch
+from chatterbox import ChatterboxTTS
+import soundfile as sf
+import numpy as np
 
-# English example
+# Initialize and setup model
 model = ChatterboxTTS.from_pretrained(device="cuda")
+model.setup_model(
+    audio_prompt_path="/audio/prompt/path",
+    exaggeration=0.5,
+    fade_duration=1024,
+)
 
-text = "Ezreal and Jinx teamed up with Ahri, Yasuo, and Teemo to take down the enemy's Nexus in an epic late-game pentakill."
-wav = model.generate(text)
-ta.save("test-english.wav", wav, model.sr)
+audio = []
 
-# Multilingual examples
-multilingual_model = ChatterboxMultilingualTTS.from_pretrained(device=device)
+# Perform Inference
+for audio_chunk in self.model.generate_stream(
+    text="Hi, I am an AI assistant! How can I help you today?",
+    cfg_weight=0.5,
+    chunk_size=25,
+    temperature=0.8,
+    context_window=25,
+):
+    audio.append(audio_chunk)
 
-french_text = "Bonjour, comment ça va? Ceci est le modèle de synthèse vocale multilingue Chatterbox, il prend en charge 23 langues."
-wav_french = multilingual_model.generate(spanish_text, language_id="fr")
-ta.save("test-french.wav", wav_french, model.sr)
-
-chinese_text = "你好，今天天气真不错，希望你有一个愉快的周末。"
-wav_chinese = multilingual_model.generate(chinese_text, language_id="zh")
-ta.save("test-chinese.wav", wav_chinese, model.sr)
-
-# If you want to synthesize with a different voice, specify the audio prompt
-AUDIO_PROMPT_PATH = "YOUR_FILE.wav"
-wav = model.generate(text, audio_prompt_path=AUDIO_PROMPT_PATH)
-ta.save("test-2.wav", wav, model.sr)
+    # Reconstruct Audio
+    audio = np.concatenate(audio, axis=0)
+    sf.write("/output/audio/dir", audio, samplerate=24000, subtype="FLOAT")
 ```
-See `example_tts.py` and `example_vc.py` for more examples.
 
+### Equal Part Cross-Fading
+The original [chatterbox-streaming](https://github.com/davidbrowne17/chatterbox-streaming) only included a simple linear fade in to newly processed chunks. This implementation failed to properly elimiate the precense of "popping" noises or audio artifacts at chunk boundaries, and it made speech generated on small chunk sizes unusable. To attempt to remedy this I implemented equal part cross-fading between chunks. While this was a great improvment over the initial implemenation it failed to emliminate all audio artifacts at chunk boundaries. 
 
+You can use either hann cross-fading or linear cross-fading, and you can modify which cross-faing type within the `_process_token_buffer()` method in the `tts.py` file. I found that using linear equal parts cross-fading with a fade_duration of 256 samples worked the best.
 
+### Server/Client Proof of Concept
+I added the `server.py` and `client.py` as server/client proof of concept, It makes use of multiprocessing to perform chunk generation and chunk processing in parrallel which, while doesn't directly reduce latency, reduces the overall total generation time which allows us incurr the increased overhead of using a smaller chunk size. To test the proof of concept, run `server.py` on one machine and wait for it to search for a connection. Once it's waiting on a connection, on another machine run the `client.py` file. The server side will generate and process chunks before sending them over a direct tcp connection in packages of 1024 bytes, and the client side will recieve the audio as raw bytes and pass it directly in a pyaudio stream for playback.
