@@ -129,20 +129,9 @@ class Conditionals:
         kwargs = torch.load(fpath, map_location=map_location, weights_only=True)
         return cls(T3Cond(**kwargs['t3']), kwargs['gen'])
 
-
-# @dataclass
-# class StreamingMetrics:
-#     """Metrics for streaming TTS generation"""
-#     latency_to_first_chunk: Optional[float] = None
-#     rtf: Optional[float] = None
-#     total_generation_time: Optional[float] = None
-#     total_audio_duration: Optional[float] = None
-#     chunk_count: int = 0
-
 class ChatterboxTTS:
     ENC_COND_LEN = 6 * S3_SR
     DEC_COND_LEN = 10 * S3GEN_SR
-
 
     def __init__(
         self,
@@ -317,8 +306,10 @@ class ChatterboxTTS:
         self,
         audio_prompt_path: Optional[str] = None,
         exaggeration: float = 0.5,
-        fade_duration: float = 0.001,
+        fade_duration: int = 1024,
     ):
+        """
+        """
         # Prepare audio prompt if provided
         if audio_prompt_path:
             self.prepare_conditionals(audio_prompt_path, exaggeration=exaggeration)
@@ -338,10 +329,7 @@ class ChatterboxTTS:
         self.t3.setup_model()
 
         # Setup cross-fading configs
-        self.fade_samples = int(round(fade_duration * self.sr))
-        self.fade_out = np.linspace(1.0, 0, self.fade_samples, endpoint=True, dtype=np.float32)
-        self.fade_in = 1.0 - self.fade_out
-
+        self.fade_samples = fade_duration
     def _process_token_buffer(
         self,
         token_buffer,
@@ -351,51 +339,46 @@ class ChatterboxTTS:
     ):
         # Build tokens_to_process by including a context window
         if len(all_tokens_so_far) > 0:
-            context_tokens = all_tokens_so_far[-context_window:] # In the case that all_tokens_so_far is less than context tokens, python slicing will return al of all_tokens_so_far
-            tokens_to_process = torch.cat([context_tokens, token_buffer], dim=-1)
-            context_length = len(context_tokens)
+            context_tokens = all_tokens_so_far[-context_window:]
+            filtered_context_tokens = drop_invalid_tokens(context_tokens)
+            filtered_context_tokens = filtered_context_tokens[filtered_context_tokens < 6561]
+            context_len = int(len(filtered_context_tokens))
+
+            filtered_new_tokens = drop_invalid_tokens(token_buffer)
+            filtered_new_tokens = filtered_new_tokens[filtered_new_tokens < 6561]
+
+            tokens_to_process = torch.cat([filtered_context_tokens, filtered_new_tokens], dim=-1)
         else:
             tokens_to_process = token_buffer
-            context_length = 0
+            context_len = 0
 
+        # Move to the correct device
+        tokens_to_process = tokens_to_process.to(self.device)
 
-        # Drop any invalid tokens and move to the correct device
-        #TODO I believe only one of these lines are necessary they appear to do the same thing
-        speech_tokens = drop_invalid_tokens(tokens_to_process)
-        speech_tokens = speech_tokens[speech_tokens < 6561]
-
-        speech_tokens = speech_tokens.to(self.device)
-
-        if len(speech_tokens) == 0:
+        if len(tokens_to_process) == 0:
             return None, None, False
 
         # Run S3Gen inference to get a waveform (1 × T)
         wav, _ = self.s3gen.inference(
-            speech_tokens=speech_tokens,
+            speech_tokens=tokens_to_process,
             ref_dict=self.conds.gen,
         )
         wav = wav.squeeze(0).detach().cpu().numpy()
 
         # If we have context tokens, crop out the samples corresponding to them
-        """
-        NOTE
-        Samples_per_token calculation assumes that each token corresponds to an equal number of samples. 
-        This is a simplification and may not hold true for all tokenization schemes or models.
-          For more accurate results, consider using alignment information if available.
-        """
-        if context_length > 0:
-            samples_per_token = len(wav) / len(speech_tokens)
-            skip_samples = int(context_length * samples_per_token)
+        if context_len > 0:
+            samples_per_token = len(wav) / float(len(tokens_to_process))
+            skip_samples = int(round(context_len * samples_per_token))
             new_chunk = wav[skip_samples:]
         else:
             new_chunk = wav
 
-        if len(new_chunk) == 0:
+        if new_chunk.size == 0:
             return None, None, False
 
-        crossfaded_chunk, new_tail = self.linear_cross_fading(prev_tail, new_chunk, self.fade_samples)
-
+        #crossfaded_chunk, new_tail = self.linear_cross_fading(prev_tail, new_chunk, self.fade_samples)
         # crossfaded_chunk, new_tail = self.exponential_cross_fading(prev_tail, new_chunk, self.fade_samples)
+        crossfaded_chunk, new_tail = self.hann_cross_fading(prev_tail, new_chunk, self.fade_samples)
         return crossfaded_chunk, new_tail, True
 
     def linear_cross_fading(
@@ -437,74 +420,52 @@ class ChatterboxTTS:
 
         return out[:-fade_samples], out[-fade_samples:]
 
-    def exponential_cross_fading(
-        self,
-        prev_tail,
-        new_chunk,
-        fade_samples,
-        curve: float = 2.0
-    ):
-        if prev_tail is None:
-            audio_out = new_chunk[:-fade_samples].copy()
-            new_tail = new_chunk[-fade_samples:].copy()
-            return audio_out, new_tail
-
-        fade_len = min(fade_samples, prev_tail.size, new_chunk.size)
-
-        if fade_len == 0:
-            # Nothing to fade — just concatenate
-            audio_out = np.concatenate([prev_tail, new_chunk])
-            new_tail = audio_out[-fade_samples:].copy()
-            return audio_out[:-fade_samples].copy(), new_tail
-
-        tail = prev_tail[-fade_len:]
-        head = new_chunk[:fade_len]
-
-        # --- Exponential-decay crossfade curves ---
-        # t goes from 0 to 1 across the fade region
-        t = np.linspace(0.0, 1.0, fade_len, dtype=np.float32)
-
-        # Raw exponential decay: 1 -> exp(-curve)
-        raw = np.exp(-curve * t)
-
-        # Normalize so that fade_out goes exactly from 1 -> 0
-        # fade_out[0] = 1, fade_out[-1] = 0
-        fade_out = (raw - raw[-1]) / (raw[0] - raw[-1])
-
-        # Complementary fade-in (ensures unity gain: fade_out + fade_in = 1)
-        fade_in = 1.0 - fade_out
-
-        # Blend overlap region
-        blended = tail * fade_out + head * fade_in
-
-        # Don’t re-emit prev_tail (it was already played previously)
-        out = np.concatenate([blended, new_chunk[fade_len:]])
-
-        audio_out = out[:-fade_samples].copy()
-        new_tail = out[-fade_samples:].copy()
-        return audio_out, new_tail
-
     def hann_cross_fading(
         self,
         prev_tail,
         new_chunk,
         fade_samples
     ):
-        new_head = new_chunk[:fade_samples]
+        """
+        Implements hann cross fading between chunks.
 
-        window = np.hanning(2 * fade_samples).astype(np.float32)
+        Args:
+            prev_tail: Tail of the previously generated chunk.
+            new_chunk: New audio chunk
+            fade_samples: Number of samples to apply crossfade over
+        
+        Returns:
+            np.ndarray: Audio Chunk that cross fades new chunk with the tail of the old chunk.
+        """
+        # No previous chunk
+        if prev_tail is None:
+            audio_out = new_chunk[:-fade_samples].copy()
+            new_tail = new_chunk[-fade_samples:].copy()
+            return audio_out, new_tail
 
-        fade_in = window[:fade_samples]
-        fade_out = window[fade_samples:]
+        # Calculate available fade_len
+        fade_len = min(fade_samples, prev_tail.size, new_chunk.size)
 
-        cross = prev_tail * fade_out + new_head * fade_in
+        # prev_tail or new_chunk too small for cross-fading
+        if fade_len == 0:
+            audio_out = np.concatenate([prev_tail, new_chunk])
+            new_tail = audio_out[-fade_samples:].copy()
+            return audio_out[:-fade_samples].copy(), new_tail
+        
+        # Create hanning window
+        window = np.hanning(2 * fade_len).astype(np.float32)
+        fade_in = window[:fade_len]
+        fade_out = window[fade_len:]
 
-        out = np.concatenate([cross, new_chunk[fade_samples:]])
+        # Compute crossfade chunk
+        trial = prev_tail[-fade_len:]
+        head = new_chunk[:fade_len]
+        cross = trial * fade_out + head * fade_in
 
-        return out
-
-    
-
+        # Output processed audio
+        audio_out = np.concatenate([prev_tail[:-fade_len], cross, new_chunk[fade_len:]])
+        new_tail = audio_out[-fade_samples:].copy()
+        return audio_out[:-fade_samples].copy(), new_tail
 
     def generate_chunks(
         self,
@@ -518,21 +479,16 @@ class ChatterboxTTS:
     ) -> Generator[Tuple[torch.Tensor], None, None]:
         """
         Streaming version of generate that yields unprocessed audio chunks as they are generated.
-        This funciton is intended to be used in the multipiprocessing implementation.
+        This funciton is intended to be used in the server/client multiprocessing implemenation in server.py.
         
         Args:
             text: Input text to synthesize
-            audio_prompt_path: Optional path to reference audio for voice cloning
-            exaggeration: Emotion exaggeration factor
             cfg_weight: Classifier-free guidance weight
             temperature: Sampling temperature
             chunk_size: Number of speech tokens per chunk
-            context_window: The context passed for each chunk
-            fade_duration: Seconds to apply linear fade-in on each chunk
             
         Yields:
-            Tuple of (audio_chunk, metrics) where audio_chunk is a torch.Tensor
-            and metrics contains timing information
+            np.ndarray: unprocessed audio chunk
         """
         # chunk text by sentence to avoid token limit
         sentences = re.split(r'(?<=[.!?])\s+', text)
@@ -581,25 +537,24 @@ class ChatterboxTTS:
         top_p=1.0,
         cfg_weight: float = 0.5,
         temperature: float = 0.8,
-        chunk_size: int = 25,  # Tokens per chunk
+        chunk_size: int = 25,
         context_window: int = 300,
     ) -> Generator[Tuple[torch.Tensor], None, None]:
         """
-        Streaming version of generate that yields audio chunks as they are generated.
+        Streaming version of generate that yields processed audio chunks as they are generated.
         
         Args:
             text: Input text to synthesize
-            audio_prompt_path: Optional path to reference audio for voice cloning
-            exaggeration: Emotion exaggeration factor
+            repetition_penalty
+            min_p
+            top_p
             cfg_weight: Classifier-free guidance weight
             temperature: Sampling temperature
             chunk_size: Number of speech tokens per chunk
             context_window: The context passed for each chunk
-            fade_duration: Seconds to apply linear fade-in on each chunk
             
         Yields:
-            Tuple of (audio_chunk, metrics) where audio_chunk is a torch.Tensor
-            and metrics contains timing information
+            np.ndarray: Processed audio chunk
         """
         
         # chunk text by sentence to avoid token limit
