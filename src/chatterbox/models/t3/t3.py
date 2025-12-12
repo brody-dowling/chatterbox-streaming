@@ -308,6 +308,7 @@ class T3(nn.Module):
             self.patched_model = patched_model
             self.compiled = True
 
+        # NOTE -> This was already commented out in the base chatterbox repository.
         # # Run normal generate method, which calls our custom extended methods
         # return self.patched_model.generate(
         #     inputs=initial_speech_tokens,
@@ -428,7 +429,7 @@ class T3(nn.Module):
         t3_cond: T3Cond,
         text_tokens: torch.Tensor,
         # misc conditioning
-        # prepend_prompt_speech_tokens: Optional[Tensor]=None,  NOTE -> Removing input since it doesn't seem to be implemented
+        # prepend_prompt_speech_tokens: Optional[Tensor]=None,  NOTE -> Removed input since it's not used.
 
         # num_return_sequences=1,
         max_new_tokens=None,
@@ -447,8 +448,8 @@ class T3(nn.Module):
         """
     
         # Validate / sanitize inputs
-        # assert prepend_prompt_speech_tokens is None, "not implemented" NOTE -> Doesn't seem to be implemented.
-        _ensure_BOT_EOT(text_tokens, self.hp) # TODO This was intentionally not included in the original chatterbox streaming repo, so we should determine it's purpose before adding it.
+        # assert prepend_prompt_speech_tokens is None, "not implemented" NOTE -> Removed, no need to assert if it isn't used.
+        _ensure_BOT_EOT(text_tokens, self.hp) # NOTE This was intentionally not included in the original chatterbox-streaming repo, so we should determine it's purpose before adding it.
         text_tokens = torch.atleast_2d(text_tokens).to(dtype=torch.long, device=self.device)
 
         # Default initial speech to a single start-of-speech token
@@ -462,7 +463,7 @@ class T3(nn.Module):
             cfg_weight=cfg_weight
         )
         
-        # NOTE -> For Real time applications we should not be compiling the model every time inference_stream is called, this should be done in setup
+        # NOTE -> For Real time applications we should not be compiling the model every time inference_stream is called. I've moved this to the setup_model() method in tts.py
         # self.compiled = False
         # # Setup model if not compiled
         # if not self.compiled:
@@ -495,7 +496,6 @@ class T3(nn.Module):
         bos_embed = bos_embed + self.speech_pos_emb.get_fixed_embedding(0)
 
         # batch_size=2 for CFG
-        # TODO -> If we allow for zero cfg_weight value this should be handled for that edge case
         bos_embed = torch.cat([bos_embed, bos_embed])
 
         # Combine condition and BOS token for the initial input
@@ -533,8 +533,6 @@ class T3(nn.Module):
             uncond = logits_step[1:2, :]
             cfg = torch.as_tensor(cfg_weight, device=cond.device, dtype=cond.dtype)
             logits = cond + cfg * (cond - uncond)
-
-            # NOTE -> Removed alignment_stream_analyzer logic, since it is ommited for english models. 
 
             # Apply repetition penalty
             ids_for_proc = generated_ids[:1, ...]   # batch = 1

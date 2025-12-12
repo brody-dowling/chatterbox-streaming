@@ -46,3 +46,9 @@ checkpoints/
 
 # Ignore generated sample .wav files
 **/*.wav
+
+# Ingore fine tunded model weights
+*.pt
+tokenizer.json
+transcripts_cache.json
+training_metrics.png
