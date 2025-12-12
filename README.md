@@ -1,6 +1,7 @@
 # Chatterbox-Streaming TTS
 The original Chatterbox repository from Resemble AI can be found here: https://github.com/resemble-ai/chatterbox
-The Chatterbox box streaming for, which provided much of the streaming framework, can be found here: https://github.com/davidbrowne17/chatterbox-streaming 
+
+The Chatterbox streaming fork, which provided much of the streaming framework, can be found here: https://github.com/davidbrowne17/chatterbox-streaming 
 
 ## Key Details
 - Multilingual, zero-shot TTS supporting 23 languages
