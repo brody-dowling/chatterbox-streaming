@@ -1,6 +1,6 @@
 # Chatterbox-Streaming TTS
-The orginal Chatterbox repository from Resemble AI can be found here: https://github.com/resemble-ai/chatterbox
-The Chatterbox box streaming fork which provided much of the streaming framework can be found here: https://github.com/davidbrowne17/chatterbox-streaming 
+The original Chatterbox repository from Resemble AI can be found here: https://github.com/resemble-ai/chatterbox
+The Chatterbox box streaming for, which provided much of the streaming framework, can be found here: https://github.com/davidbrowne17/chatterbox-streaming 
 
 ## Key Details
 - Multilingual, zero-shot TTS supporting 23 languages
@@ -13,9 +13,24 @@ The Chatterbox box streaming fork which provided much of the streaming framework
 - Easy voice conversion script
 
 ## LoRA Fine-Tuning
-To fine-tune Chatterbox all you need are some wav audio files with the speaker voice you want to train, just the raw wavs. Place them in the `audio_data` folder and run `lora.py`. You can configure the exact training params such as batch size, number of epochs and learning rate by modifying the values at the top of `lora.py`. You will need a CUDA gpu with at least 18gb of vram depending on your dataset size and training params. You can monitor the training metrics via the dynamic png created called `training_metrics.png`. This contains various graphs to help you track the training progress. Checkpoints and merged model will be saved to the a folder named `checkpoints_dir`. If you want to try a checkpoint you can use the `loadandmergecheckpoint.py` (make sure to set the same R and Alpha values as you used in the training). If you are using the TTS evaluation framework, once you have the path local path to your merged model assign it to `tuned_model_path` in `config.toml`.
+To fine-tune Chatterbox, all you need are some WAV audio files with the speaker voice you want to train, just the raw WAVs. Place them in the `audio_data` folder and run `lora.py`. You can configure the exact training parameters, such as batch size, number of epochs, and learning rate, by modifying the values at the top of `lora.py`. You will need a CUDA GPU with at least 18 GB of VRAM, depending on your dataset size and training parameters. You can monitor the training metrics via the dynamic PNG called `training_metrics.png`. This contains various graphs to help you track the training progress. Checkpoints and the merged model will be saved to a folder named `checkpoints_dir`. If you want to try a checkpoint, you can use the `loadandmergecheckpoint.py` (make sure to set the same R and Alpha values as you used in the training). If you are using the TTS evaluation framework, once you have the local path to your merged model, assign it to `tuned_model_path` in `config.toml`.
 
-## Streaming Parameter Tips
+## Streaming Parameters
+The Chatterbox model provides zero-shot voice cloning, allowing you to mimic any voice using a short audio sample. To provide an audio sample for Chatterbox to use, place your file in the `inputs/audio_pompts` directory and set Chatterbox's `audio_prompt` parameter to the file name. You can also control various aspects of the generated speech through the following parameters: 
+- `exaggeration`: Emotion intensity control
+  - Range: 0.0-1.0
+  - Suggested Value: 0.5
+- `cfg_weight`: Classifier-free guidance weight
+  - Range: 0.0-1.0
+  - Suggested Value: 0.3
+- `chunk_size`: Number of speech tokens per chunk. Increased chunk_size will greatly improve quality, but leads to a significant increase in latency.
+  - Suggested Value: 25
+- `fade_duration`: Number of samples over which to apply equal part cross-fading
+  - Suggested Value: 256
+- `temperature`: Sampling randomness
+  - Range: 0.1-0.9
+  - Suggested Value: 0.1
+### Streaming Parameter Tips
 - **General Use (TTS and Voice Agents):**
   - Ensure that the reference clip matches the specified language tag. Otherwise, language transfer outputs may inherit the accent of the reference clip’s language. To mitigate this, set `cfg_weight` to `0`.
   - The default settings (`exaggeration=0.5`, `cfg_weight=0.5`) work well for most prompts across all languages.
@@ -34,7 +49,7 @@ from chatterbox import ChatterboxTTS
 import soundfile as sf
 import numpy as np
 
-# Initialize and setup model
+# Initialize and set up the the  model
 model = ChatterboxTTS.from_pretrained(device="cuda")
 model.setup_model(
     audio_prompt_path="/audio/prompt/path",
@@ -60,9 +75,9 @@ for audio_chunk in self.model.generate_stream(
 ```
 
 ### Equal Part Cross-Fading
-The original [chatterbox-streaming](https://github.com/davidbrowne17/chatterbox-streaming) only included a simple linear fade in to newly processed chunks. This implementation failed to properly elimiate the precense of "popping" noises or audio artifacts at chunk boundaries, and it made speech generated on small chunk sizes unusable. To attempt to remedy this I implemented equal part cross-fading between chunks. While this was a great improvment over the initial implemenation it failed to emliminate all audio artifacts at chunk boundaries. 
+The original [chatterbox-streaming](https://github.com/davidbrowne17/chatterbox-streaming) only included a simple linear fade in to newly processed chunks. This implementation failed to properly eliminate the presence of "popping" noises or audio artifacts at chunk boundaries, and it made speech generated on small chunk sizes unusable. To attempt to remedy this, I implemented equal parts cross-fading between chunks. While this was a great improvement over the initial implementation, it failed to eliminate all audio artifacts at chunk boundaries. 
 
-You can use either hann cross-fading or linear cross-fading, and you can modify which cross-faing type within the `_process_token_buffer()` method in the `tts.py` file. I found that using linear equal parts cross-fading with a fade_duration of 256 samples worked the best.
+You can use either Hann cross-fading or linear cross-fading, and you can modify which cross-fading type within the `_process_token_buffer()` method in the `tts.py` file. I found that using linear equal parts cross-fading with a fade_duration of 256 samples worked the best.
 
 ### Server/Client Proof of Concept
-I added the `server.py` and `client.py` as server/client proof of concept, It makes use of multiprocessing to perform chunk generation and chunk processing in parrallel which, while doesn't directly reduce latency, reduces the overall total generation time which allows us incurr the increased overhead of using a smaller chunk size. To test the proof of concept, run `server.py` on one machine and wait for it to search for a connection. Once it's waiting on a connection, on another machine run the `client.py` file. The server side will generate and process chunks before sending them over a direct tcp connection in packages of 1024 bytes, and the client side will recieve the audio as raw bytes and pass it directly in a pyaudio stream for playback.
+I added the `server.py` and `client.py` as a server/client proof of concept. It makes use of multiprocessing to perform chunk generation and chunk processing in parallel, which, while it  doesn't directly reduce latency, reduces the overall total generation time, which allows us to incur the increased overhead of using a smaller chunk size. To test the proof of concept, run `server.py` on one machine and wait for it to search for a connection. Once it's waiting on a connection, on another machine, run the `client.py` file. The server side will generate and process chunks before sending them over a direct TCP connection in packages of 1024 bytes, and the client side will receive the audio as raw bytes and pass it directly in a PyAudio stream for playback.
